@@ -1,4 +1,4 @@
-# restest - test proto workflows
+# restest - define RESTful workflows
 
 Contains a collection of helper functions written in Go related to protobuf messages, RESTful services.
 
