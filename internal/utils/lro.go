@@ -2,13 +2,11 @@ package utils
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -19,8 +17,8 @@ type LongrunningOperation[Req, Resp protoreflect.ProtoMessage] struct {
 	OperationError error
 	OperationDone  bool
 
-	Request  Req
-	Response Resp
+	Request  *CustomProtoMessage[Req]
+	Response *CustomProtoMessage[Resp]
 
 	trigger func(ctx context.Context, req Req) (*longrunningpb.Operation, error)
 	get     func(ctx context.Context, req *longrunningpb.GetOperationRequest) (*longrunningpb.Operation, error)
@@ -34,7 +32,7 @@ func CreateLongrunningOperation[Req, Resp protoreflect.ProtoMessage](
 	return &LongrunningOperation[Req, Resp]{
 		trigger: trigger,
 		get:     get,
-		Request: req,
+		Request: CreateCustomProtoMessage(req),
 	}
 }
 
@@ -52,7 +50,7 @@ func (l *LongrunningOperation[Req, Resp]) Process(ctx context.Context) (bool, er
 	)
 
 	if l.OperationName == "" {
-		opResult, err = l.trigger(ctx, l.Request)
+		opResult, err = l.trigger(ctx, l.Request.Msg)
 	} else {
 		opResult, err = l.get(ctx, &longrunningpb.GetOperationRequest{
 			Name: l.OperationName,
@@ -80,73 +78,30 @@ func (l *LongrunningOperation[Req, Resp]) Process(ctx context.Context) (bool, er
 		l.OperationError = fmt.Errorf("unmarshal resonse: %w", err)
 		return true, l.OperationError
 	}
-	var typeok bool
-	l.Response, typeok = respMsg.(Resp)
+	response, typeok := respMsg.(Resp)
 	if !typeok {
 		l.OperationError = fmt.Errorf("unexpected response message of different type received: %v", respMsg)
 		return true, l.OperationError
 	}
+	l.Response = CreateCustomProtoMessage(response)
 
 	return true, nil
 }
 
-func (l *LongrunningOperation[Req, Resp]) MarshalJSON() ([]byte, error) {
-	requestBytes, err := protojson.Marshal(l.Request)
-	if err != nil {
-		return nil, fmt.Errorf("protojson.Marshal of request: %w", err)
-	}
-	responseBytes, err := protojson.Marshal(l.Response)
-	if err != nil {
-		return nil, fmt.Errorf("protojson.Marshal of response: %w", err)
-	}
-
-	type Alias LongrunningOperation[Req, Resp]
-	return json.Marshal(&struct {
-		*Alias
-		Requestbytes  []byte
-		Responsebytes []byte
-	}{
-		Requestbytes:  requestBytes,
-		Responsebytes: responseBytes,
-		Alias:         (*Alias)(l),
-	})
-}
-
-func (l *LongrunningOperation[Req, Resp]) UnmarshalJSON(data []byte) error {
-	type Alias LongrunningOperation[Req, Resp]
-	var uHolder struct {
-		*Alias
-		Requestbytes  []byte
-		Responsebytes []byte
-	}
-	err := json.Unmarshal(data, &uHolder)
-	if err != nil {
-		return err
-	}
-
-	l.OperationDone = uHolder.OperationDone
-	l.OperationError = uHolder.OperationError
-	l.OperationName = uHolder.OperationName
-
-	req := l.Request.ProtoReflect().New().Interface()
-	if err := protojson.Unmarshal(uHolder.Requestbytes, req); err != nil {
-		return err
-	}
-	l.Request = req.(Req)
-	resp := l.Response.ProtoReflect().New().Interface()
-	if err := protojson.Unmarshal(uHolder.Responsebytes, resp); err != nil {
-		return err
-	}
-	l.Response = resp.(Resp)
-	return nil
-}
-
 func (l *LongrunningOperation[Req, Resp]) GetRequest() Req {
-	return l.Request
+	var request Req
+	if l.Request == nil {
+		return request
+	}
+	return l.Request.Msg
 }
 
 func (l *LongrunningOperation[Req, Resp]) GetResponse() Resp {
-	return l.Response
+	var response Resp
+	if !l.OperationDone || l.OperationError != nil || l.Response == nil {
+		return response
+	}
+	return l.Response.Msg
 }
 
 func ProcessLongRunningOperationToCompletion[
@@ -170,39 +125,4 @@ func ProcessLongRunningOperationToCompletion[
 		return fmt.Errorf("timed-out while retrying")
 	}
 	return innererr
-}
-
-func GetLongRunningOperationResult(
-	ctx context.Context,
-	name string,
-	f func(context.Context, *longrunningpb.GetOperationRequest) (*longrunningpb.Operation, error),
-	dst protoreflect.ProtoMessage,
-) error {
-	var (
-		res *longrunningpb.Operation
-		err error
-	)
-
-	if err := RetryFunc(time.Minute*10, func() error {
-		res, err = f(ctx, &longrunningpb.GetOperationRequest{Name: name})
-		if err != nil {
-			return err
-		}
-		if res.Done {
-			return nil
-		}
-		return fmt.Errorf("not done yet")
-	}); err != nil {
-		return err
-	}
-
-	if res.GetError() != nil {
-		return fmt.Errorf("code: %v, message: %v", res.GetError().GetCode(), res.GetError().GetMessage())
-	}
-
-	err = anypb.UnmarshalTo(res.GetResponse(), dst, proto.UnmarshalOptions{DiscardUnknown: true})
-	if err != nil {
-		return err
-	}
-	return nil
 }
