@@ -33,5 +33,5 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("%v: \nreq: %v\nresp: %v\n", echoEndpoint, utils.PrettyPrintProto(&req), utils.PrettyPrintProto(&resp))
+	fmt.Printf("%v\n--> %v\n<-- %v\n", echoEndpoint, utils.PrettyPrintProto(&req), utils.PrettyPrintProto(&resp))
 }
